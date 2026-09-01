@@ -1,0 +1,250 @@
+# Compose-network defaults. Host processes use OTEL_EXPORTER_OTLP_ENDPOINT,
+# NATS_URL, LANGGRAPH_SERVER_URL from .env (often localhost). Override the
+# *_COMPOSE_* variables when a container should reach a broker or collector
+# that is not on this Compose network.
+x-otel-client-env: &otel-client-env
+  OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-false}
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_COMPOSE_OTLP_ENDPOINT:-http://otel-collector:4318}
+  OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-http/protobuf}
+  OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
+  OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-deployment.environment=local,service.namespace=agent-team}
+
+services:
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-langgraph}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: ${POSTGRES_DB:-langgraph}
+    ports:
+      - "5432:5432"
+    volumes:
+      - langgraph-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-langgraph} -d ${POSTGRES_DB:-langgraph}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  nats:
+    image: nats:2.11-alpine
+    command: ["-js", "-m", "8222"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8222/healthz >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  langgraph-api:
+    image: ${IMAGE_NAME:-langchain/langgraph-api:3.11}
+    ports:
+      - "8123:8000"
+    env_file:
+      - .env
+    environment:
+      REDIS_URI: redis://redis:6379
+      DATABASE_URI: postgresql://${POSTGRES_USER:-langgraph}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-langgraph}?sslmode=disable
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-}
+      LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL:-${LANGFUSE_HOST:-}}
+      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI:-}
+      MLFLOW_EXPERIMENT_NAME: ${MLFLOW_EXPERIMENT_NAME:-agent-team}
+      MLFLOW_TRACKING_USERNAME: ${MLFLOW_TRACKING_USERNAME:-}
+      MLFLOW_TRACKING_PASSWORD: ${MLFLOW_TRACKING_PASSWORD:-}
+      MLFLOW_TRACKING_TOKEN: ${MLFLOW_TRACKING_TOKEN:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      NATS_ENABLED: "true"
+      NATS_URL: nats://nats:4222
+      NATS_STREAM: ${NATS_STREAM:-AGENT_REVIEW}
+      NATS_SUBJECT: ${NATS_SUBJECT:-agent.review.required}
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+
+  slack-publisher:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "slack_publisher"]
+    env_file:
+      - .env
+    environment:
+      <<: *otel-client-env
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME_SLACK_PUBLISHER:-slack-publisher}
+      NATS_ENABLED: "true"
+      NATS_URL: ${NATS_COMPOSE_URL:-nats://nats:4222}
+      NATS_QUEUE: ${NATS_QUEUE:-slack-publisher}
+      SLACK_API_BASE_URL: ${SLACK_COMPOSE_API_BASE_URL:-https://slack.com/api/}
+    depends_on:
+      nats:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    # Scale workers; NATS load-balances via the push queue group:
+    # docker compose up --scale slack-publisher=3
+
+  slack-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      <<: *otel-client-env
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME_SLACK_GATEWAY:-slack-gateway}
+      NATS_ENABLED: "true"
+      NATS_URL: ${NATS_COMPOSE_URL:-nats://nats:4222}
+      NATS_STREAM: ${NATS_STREAM:-AGENT_REVIEW}
+      NATS_FEEDBACK_SUBJECT: ${NATS_FEEDBACK_SUBJECT:-agent.review.feedback}
+    depends_on:
+      nats:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+
+  workflow-resumer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "workflow_resumer"]
+    env_file:
+      - .env
+    environment:
+      <<: *otel-client-env
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME_WORKFLOW_RESUMER:-workflow-resumer}
+      NATS_ENABLED: "true"
+      NATS_URL: ${NATS_COMPOSE_URL:-nats://nats:4222}
+      NATS_STREAM: ${NATS_STREAM:-AGENT_REVIEW}
+      NATS_FEEDBACK_SUBJECT: ${NATS_FEEDBACK_SUBJECT:-agent.review.feedback}
+      NATS_FEEDBACK_QUEUE: ${NATS_FEEDBACK_QUEUE:-workflow-resumer}
+      LANGGRAPH_SERVER_URL: ${LANGGRAPH_COMPOSE_URL:-http://langgraph-api:8000}
+    depends_on:
+      nats:
+        condition: service_healthy
+      langgraph-api:
+        condition: service_started
+      otel-collector:
+        condition: service_started
+    # Scale workers; NATS load-balances via the push queue group:
+    # docker compose up --scale workflow-resumer=3
+
+  # OTLP collector. Apps send here via OTEL_EXPORTER_OTLP_ENDPOINT so the
+  # same image can target this service, a collector on another host, or a
+  # vendor intake. The collector forwards to OTEL_COLLECTOR_FORWARD_ENDPOINT
+  # (Jaeger in this compose file, or any OTLP backend).
+  otel-collector:
+    image: ${OTEL_COLLECTOR_IMAGE:-otel/opentelemetry-collector-contrib:0.122.1}
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "${OTEL_COLLECTOR_OTLP_GRPC_PORT:-4317}:4317"
+      - "${OTEL_COLLECTOR_OTLP_HTTP_PORT:-4318}:4318"
+      - "${OTEL_COLLECTOR_HEALTH_PORT:-13133}:13133"
+    environment:
+      OTEL_COLLECTOR_RECEIVER_GRPC_ENDPOINT: ${OTEL_COLLECTOR_RECEIVER_GRPC_ENDPOINT:-0.0.0.0:4317}
+      OTEL_COLLECTOR_RECEIVER_HTTP_ENDPOINT: ${OTEL_COLLECTOR_RECEIVER_HTTP_ENDPOINT:-0.0.0.0:4318}
+      OTEL_COLLECTOR_HEALTH_ENDPOINT: ${OTEL_COLLECTOR_HEALTH_ENDPOINT:-0.0.0.0:13133}
+      OTEL_COLLECTOR_DEBUG_VERBOSITY: ${OTEL_COLLECTOR_DEBUG_VERBOSITY:-basic}
+      OTEL_COLLECTOR_FORWARD_ENDPOINT: ${OTEL_COLLECTOR_FORWARD_ENDPOINT:-jaeger:4317}
+      OTEL_COLLECTOR_FORWARD_INSECURE: ${OTEL_COLLECTOR_FORWARD_INSECURE:-true}
+      OTEL_COLLECTOR_FORWARD_AUTH: ${OTEL_COLLECTOR_FORWARD_AUTH:-}
+    depends_on:
+      jaeger:
+        condition: service_started
+
+  jaeger:
+    image: ${JAEGER_IMAGE:-jaegertracing/all-in-one:1.68.0}
+    environment:
+      COLLECTOR_OTLP_ENABLED: ${JAEGER_COLLECTOR_OTLP_ENABLED:-true}
+    ports:
+      - "${JAEGER_UI_PORT:-16686}:16686"
+
+  # Optional tracking server. Start with: docker compose --profile mlflow up
+  # Point the graph at it: MLFLOW_TRACKING_URI=http://mlflow:5000
+  # (from the host CLI use http://localhost:5000). Leave Langfuse keys unset
+  # or set LANGFUSE_ENABLED=false so MLflow is the selected backend.
+  mlflow:
+    profiles: ["mlflow"]
+    image: ghcr.io/mlflow/mlflow:v3.3.2
+    command:
+      [
+        "mlflow",
+        "server",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "5000",
+        "--backend-store-uri",
+        "sqlite:////mlflow/mlflow.db",
+        "--default-artifact-root",
+        "/mlflow/artifacts",
+      ]
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow-data:/mlflow
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health')",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  # Local Slack stand-in. Accepts chat.postMessage and POSTs a signed
+  # Approve to the gateway so HITL can run without a Slack workspace.
+  # docker compose --profile slack-emulator up
+  # Set SLACK_COMPOSE_API_BASE_URL=http://slack-emulator:8081/api/
+  # SLACK_ENABLED=true SLACK_BOT_TOKEN=xoxb-emulator SLACK_SIGNING_SECRET=...
+  slack-emulator:
+    profiles: ["slack-emulator"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "slack_emulator"]
+    env_file:
+      - .env
+    ports:
+      - "${SLACK_EMULATOR_PORT:-8081}:8081"
+    environment:
+      SLACK_EMULATOR_HOST: "0.0.0.0"
+      SLACK_EMULATOR_PORT: ${SLACK_EMULATOR_PORT:-8081}
+      SLACK_EMULATOR_AUTO_APPROVE: ${SLACK_EMULATOR_AUTO_APPROVE:-true}
+      SLACK_EMULATOR_APPROVE_DELAY_SECONDS: ${SLACK_EMULATOR_APPROVE_DELAY_SECONDS:-0.4}
+      SLACK_SIGNING_SECRET: ${SLACK_SIGNING_SECRET:-emulator-secret}
+      SLACK_INTERACTIVITY_URL: ${SLACK_INTERACTIVITY_URL_COMPOSE:-http://slack-gateway:8080/slack/interactive}
+    depends_on:
+      slack-gateway:
+        condition: service_started
+
+volumes:
+  langgraph-data:
+  mlflow-data:

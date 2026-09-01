@@ -1,0 +1,40 @@
+# OpenTelemetry Collector. Every destination is an env var so this process
+# can sit in Compose next to Jaeger, or on a VM forwarding to a vendor OTLP
+# intake. Apps never hardcode this hostname — they read OTEL_EXPORTER_OTLP_*.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: ${env:OTEL_COLLECTOR_RECEIVER_GRPC_ENDPOINT:-0.0.0.0:4317}
+      http:
+        endpoint: ${env:OTEL_COLLECTOR_RECEIVER_HTTP_ENDPOINT:-0.0.0.0:4318}
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+  batch:
+    timeout: 5s
+    send_batch_size: 256
+
+exporters:
+  debug:
+    verbosity: ${env:OTEL_COLLECTOR_DEBUG_VERBOSITY:-basic}
+  otlp/forward:
+    endpoint: ${env:OTEL_COLLECTOR_FORWARD_ENDPOINT:-jaeger:4317}
+    tls:
+      insecure: ${env:OTEL_COLLECTOR_FORWARD_INSECURE:-true}
+    headers:
+      authorization: ${env:OTEL_COLLECTOR_FORWARD_AUTH}
+
+extensions:
+  health_check:
+    endpoint: ${env:OTEL_COLLECTOR_HEALTH_ENDPOINT:-0.0.0.0:13133}
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug, otlp/forward]

@@ -1,0 +1,66 @@
+# Bytecode and packaging
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+.eggs/
+dist/
+build/
+pip-wheel-metadata/
+*.manifest
+*.spec
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Secrets and local overrides (keep .env.example)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+credentials.json
+
+# Tests and linters
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.hypothesis/
+.cache/
+
+# LangGraph Server / CLI local persistence
+.langgraph_api/
+.langgraph_checkpoint.db
+*.sqlite3
+
+# MLflow local tracking (file:./mlruns)
+mlruns/
+mlartifacts/
+mlflow.db
+
+# Logs and OS
+*.log
+.DS_Store
+Thumbs.db
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Notebooks (if used for evals)
+.ipynb_checkpoints/

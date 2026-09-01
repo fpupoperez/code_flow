@@ -1,0 +1,12 @@
+{
+  "$schema": "https://langgra.ph/schema.json",
+  "python_version": "3.11",
+  "dependencies": ["."],
+  "graphs": {
+    "agent_team": {
+      "path": "./src/agent_team/graph.py:graph",
+      "description": "Supervisor team: researcher, coder, editor, and human review."
+    }
+  },
+  "env": ".env"
+}
